@@ -1,0 +1,165 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoJson.h>
+
+#define BUTTON_PIN D1   // GPIO5
+
+// ========= WiFi =========
+const char* ssid = "-----";
+const char* password = "-------";
+
+// ========= Telegram =========
+String botToken = "-------------";
+String chatID   = "----------";
+
+WiFiClientSecure secureClient;
+WiFiClient httpClient;
+
+// ===== Button logic variables =====
+bool lastState = HIGH;
+unsigned long pressStart = 0;
+unsigned long lastRelease = 0;
+int pressCount = 0;
+
+// =========================
+void setup() {
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  Serial.begin(9600);
+
+  WiFi.begin(ssid, password);
+  secureClient.setInsecure();  // HTTPS
+
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// =========================
+void loop() {
+  bool currentState = digitalRead(BUTTON_PIN);
+
+  // Button pressed (HIGH → LOW)
+  if (lastState == HIGH && currentState == LOW) {
+    pressStart = millis();
+  }
+
+  // Button released (LOW → HIGH)
+  if (lastState == LOW && currentState == HIGH) {
+    unsigned long pressDuration = millis() - pressStart;
+    pressCount++;
+    lastRelease = millis();
+
+    // Long press (≥ 3 seconds)
+    if (pressDuration >= 3000) {
+      sendAlert("🔴 ---Alone---");
+      pressCount = 0;
+    }
+  }
+
+  // Detect single or double click
+  if (pressCount > 0 && (millis() - lastRelease) > 400) {
+    if (pressCount == 1) {
+      sendAlert("🚨 EMERGENCY ALERT");
+    }
+    else if (pressCount == 2) {
+      sendAlert("🆘 NEED HELP");
+    }
+    pressCount = 0;
+  }
+
+  lastState = currentState;
+  delay(20); // debounce
+}
+
+// =========================
+void sendAlert(String alertType) {
+  String locationInfo = getIPLocation();
+  String wifiInfo     = scanNearbyWiFi();
+
+  String message =
+    alertType + "\n\n"
+    "Time: " + getTimeString() + "\n\n" +
+    locationInfo + "\n\n" +
+    "Nearby Wi-Fi:\n" + wifiInfo;
+
+  sendTelegramMessage(message);
+}
+
+// =========================
+String getIPLocation() {
+  HTTPClient http;
+  http.begin(httpClient, "http://ip-api.com/json");
+  int code = http.GET();
+
+  if (code != 200) {
+    http.end();
+    return "IP Location: Not available";
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  StaticJsonDocument<512> doc;
+  deserializeJson(doc, payload);
+
+  return "IP Location:\nCity: " + doc["city"].as<String>() +
+         "\nRegion: " + doc["regionName"].as<String>() +
+         "\nISP: " + doc["isp"].as<String>() +
+         "\nPublic IP: " + doc["query"].as<String>();
+}
+
+// =========================
+String scanNearbyWiFi() {
+  String result = "";
+  int n = WiFi.scanNetworks();
+
+  if (n == 0) return "No Wi-Fi found";
+
+  for (int i = 0; i < n && i < 5; i++) {
+    result += WiFi.SSID(i) + " (" + WiFi.RSSI(i) + " dBm)\n";
+  }
+  return result;
+}
+
+// =========================
+void sendTelegramMessage(String text) {
+  if (!secureClient.connect("api.telegram.org", 443)) {
+    Serial.println("Telegram connection failed");
+    return;
+  }
+
+  String url = "/bot" + botToken +
+               "/sendMessage?chat_id=" + chatID +
+               "&text=" + urlencode(text);
+
+  secureClient.print(
+    String("GET ") + url + " HTTP/1.1\r\n" +
+    "Host: api.telegram.org\r\n" +
+    "Connection: close\r\n\r\n"
+  );
+
+  Serial.println("Telegram alert sent");
+}
+
+// =========================
+String urlencode(String str) {
+  String encoded = "";
+  for (char c : str) {
+    if (c == ' ') encoded += "%20";
+    else if (c == '\n') encoded += "%0A";
+    else encoded += c;
+  }
+  return encoded;
+}
+
+// =========================
+String getTimeString() {
+  return String(millis() / 1000) + " sec since boot";
+}
